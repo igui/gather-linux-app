@@ -1,8 +1,30 @@
-const { app, BrowserWindow, shell, session } = require('electron');
+const { app, BrowserWindow, shell, session, desktopCapturer } = require('electron');
 const path = require('path');
 
+// --- Chromium Flags passed before app.ready ---
+// WebRTCPipeWireCapturer : activates PipeWire capturer necessary for
+// getDisplayMedia to pass through xdg-desktop-portal on Wayland.
+// WaylandWindowDecorations : renders client-side decorations correctly.
+app.commandLine.appendSwitch(
+  'enable-features',
+  'WebRTCPipeWireCapturer,WaylandWindowDecorations',
+);
+// ozone-platform-hint=auto : lets Chromium choose Wayland if available,
+// otherwise falls back to X11. This avoids forcing a transport and breaks less
+// on hybrid setups.
+app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+
+// Prevent multiple instances
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+  process.exit(0);
+}
+
+let mainWindow = null;
+
 function createWindow() {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     autoHideMenuBar: true,
@@ -31,6 +53,32 @@ function createWindow() {
       return true;
     }
     return false;
+  });
+
+  // --- Screen sharing (getDisplayMedia) ---
+  // Flow on Wayland + PipeWire (WebRTCPipeWireCapturer active):
+  //   1. Gather calls navigator.mediaDevices.getDisplayMedia()
+  //   2. Chromium invokes our handler
+  //   3. desktopCapturer.getSources({ types: ['screen'] }) triggers the
+  //      xdg-desktop-portal, the user chooses a screen
+  //   4. We pass the chosen source to the callback
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    try {
+      // NOTE: We request ONLY ['screen']. Requesting ['screen', 'window']
+      // on Wayland can cause the portal to double-invoke PipeWire and freeze the process.
+      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      
+      if (sources.length === 0) {
+        callback({});
+        return;
+      }
+
+      // Pass the selected screen to gather
+      callback({ video: sources[0] });
+    } catch (err) {
+      console.error('desktopCapturer failed:', err);
+      callback({});
+    }
   });
 
   // Handle new window requests (e.g. target="_blank" links)
@@ -67,6 +115,13 @@ function createWindow() {
   
   mainWindow.loadURL('https://app.v2.gather.town/');
 }
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
 
 app.whenReady().then(() => {
   createWindow();
