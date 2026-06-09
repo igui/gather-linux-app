@@ -83,31 +83,51 @@ function createWindow() {
 
   // Handle new window requests (e.g. target="_blank" links)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    const parsedUrl = new URL(url);
-    
-    // Allow Google auth popups and internal gather.town popups to open as new electron windows
-    if (parsedUrl.hostname.includes('google.com') || 
-        parsedUrl.hostname.includes('gather.town') ||
-        parsedUrl.hostname.includes('firebaseapp.com')) {
+    // Allow empty windows and data blobs to open normally
+    if (url === 'about:blank' || url.startsWith('blob:') || url.startsWith('data:')) {
       return { action: 'allow' };
+    }
+
+    try {
+      const parsedUrl = new URL(url);
+      
+      // Allow Google auth popups and internal gather.town popups to open as new electron windows
+      if (parsedUrl.hostname.includes('google.com') || 
+          parsedUrl.hostname.includes('gather.town') ||
+          parsedUrl.hostname.includes('firebaseapp.com')) {
+        return { action: 'allow' };
+      }
+    } catch (e) {
+      console.error('Invalid URL:', url);
     }
     
     // Route everything else to the OS default browser
-    shell.openExternal(url);
+    shell.openExternal(url).catch(console.error);
     return { action: 'deny' };
   });
 
   // Intercept same-window navigation to external sites
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    const parsedUrl = new URL(url);
-    
-    if (!parsedUrl.hostname.includes('gather.town') && 
-        !parsedUrl.hostname.includes('google.com') && 
-        !parsedUrl.hostname.includes('firebaseapp.com')) {
-      event.preventDefault();
-      shell.openExternal(url);
+  const blockOffOriginNavigation = (event, url) => {
+    if (url === 'about:blank' || url.startsWith('blob:') || url.startsWith('data:') || url.startsWith('file://')) {
+      return;
     }
-  });
+
+    try {
+      const parsedUrl = new URL(url);
+      
+      if (!parsedUrl.hostname.includes('gather.town') && 
+          !parsedUrl.hostname.includes('google.com') && 
+          !parsedUrl.hostname.includes('firebaseapp.com')) {
+        event.preventDefault();
+        shell.openExternal(url).catch(console.error);
+      }
+    } catch (e) {
+      console.error('Invalid URL:', url);
+    }
+  };
+
+  mainWindow.webContents.on('will-navigate', blockOffOriginNavigation);
+  mainWindow.webContents.on('will-redirect', blockOffOriginNavigation);
 
   // Load Gather
   // Gather checks the user agent. We need to pretend to be a regular Chrome browser to avoid the "desktop not supported" error
