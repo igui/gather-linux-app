@@ -1,5 +1,7 @@
-const { app, BrowserWindow, shell, session, desktopCapturer } = require('electron');
+const { app, BrowserWindow, shell, session, desktopCapturer, globalShortcut } = require('electron');
 const path = require('path');
+
+let store;
 
 // --- Chromium Flags passed before app.ready ---
 // WebRTCPipeWireCapturer : activates PipeWire capturer necessary for
@@ -9,6 +11,9 @@ app.commandLine.appendSwitch(
   'enable-features',
   'WebRTCPipeWireCapturer,WaylandWindowDecorations',
 );
+// Disable DocumentPictureInPictureAPI to prevent Gather from throwing
+// "Document PiP requires user activation" errors when backgrounded/unlocked.
+app.commandLine.appendSwitch('disable-features', 'DocumentPictureInPictureAPI');
 // ozone-platform-hint=auto : lets Chromium choose Wayland if available,
 // otherwise falls back to X11. This avoids forcing a transport and breaks less
 // on hybrid setups.
@@ -23,7 +28,7 @@ if (!gotSingleInstanceLock) {
 
 let mainWindow = null;
 
-function createWindow() {
+async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -34,6 +39,12 @@ function createWindow() {
       contextIsolation: true,
       // Need this for Gather.town to function properly
       webSecurity: true,
+      // Captures Gather's Redux store (for the video toggle shortcut) via the
+      // Redux DevTools hook, which must exist before page scripts run
+      preload: path.join(__dirname, 'preload.js'),
+      // Preload needs the full webFrame API (executeJavaScript) to define the
+      // hook in the main world; contextIsolation still protects Node
+      sandbox: false,
     }
   });
 
@@ -98,7 +109,7 @@ function createWindow() {
         return { action: 'allow' };
       }
     } catch (e) {
-      console.error('Invalid URL:', url);
+      console.error('Invalid URL (window-open):', url.substring(0, 50));
     }
     
     // Route everything else to the OS default browser
@@ -115,14 +126,21 @@ function createWindow() {
     try {
       const parsedUrl = new URL(url);
       
-      if (!parsedUrl.hostname.includes('gather.town') && 
-          !parsedUrl.hostname.includes('google.com') && 
+      if (parsedUrl.hostname.includes('gather.town')) {
+        // Save the last visited gather.town space
+        if (url.includes('/app/') && store) {
+          store.set('lastVisitedSpace', url);
+        }
+        return;
+      }
+      
+      if (!parsedUrl.hostname.includes('google.com') && 
           !parsedUrl.hostname.includes('firebaseapp.com')) {
         event.preventDefault();
         shell.openExternal(url).catch(console.error);
       }
     } catch (e) {
-      console.error('Invalid URL:', url);
+      console.error('Invalid URL (off-origin-navigation):', url.substring(0, 50));
     }
   };
 
@@ -133,7 +151,18 @@ function createWindow() {
   // Gather checks the user agent. We need to pretend to be a regular Chrome browser to avoid the "desktop not supported" error
   mainWindow.webContents.userAgent = mainWindow.webContents.userAgent.replace(/Electron\/\S+ /, '').replace(/gather-app\/\S+ /, '');
   
-  mainWindow.loadURL('https://app.v2.gather.town/');
+  // Wait for store to be initialized if it isn't already
+  if (!store) {
+    const Store = (await import('electron-store')).default;
+    store = new Store();
+  }
+
+  const lastSpace = store.get('lastVisitedSpace');
+  if (lastSpace) {
+    mainWindow.loadURL(lastSpace);
+  } else {
+    mainWindow.loadURL('https://app.v2.gather.town/');
+  }
 }
 
 app.on('second-instance', () => {
@@ -146,9 +175,46 @@ app.on('second-instance', () => {
 app.whenReady().then(() => {
   createWindow();
 
+  // Toggle self mute from anywhere (works even when the window is unfocused).
+  // Calls the same store action as Gather's mic button so the UI stays in sync.
+  // gatherDev.Repos.localMediaSelfInfo only exists after entering a space,
+  // hence the optional chaining.
+  globalShortcut.register('CommandOrControl+Shift+A', () => {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.executeJavaScript(
+        `globalThis.gatherDev?.Repos?.localMediaSelfInfo?.toggleAudioMuteClicked({ reason: "globalShortcut" })`
+      ).catch(console.error);
+    }
+  });
+
+  // Toggle camera from anywhere. Dispatches setVideoMuteClicked on Gather's
+  // Redux store, captured by preload.js via the Redux DevTools hook. No-op
+  // until the store exists (i.e. before the app chunk loads).
+  globalShortcut.register('CommandOrControl+Shift+V', () => {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.executeJavaScript(
+        `window.__toggleGatherVideo?.()`
+      ).catch(console.error);
+    }
+  });
+
+  globalShortcut.register('CommandOrControl+Shift+I', () => {
+    if (mainWindow && mainWindow.webContents) {
+      if (mainWindow.webContents.isDevToolsOpened()) {
+        mainWindow.webContents.closeDevTools();
+      } else {
+        mainWindow.webContents.openDevTools({ mode: 'detach' });
+      }
+    }
+  });
+
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });
 
 app.on('window-all-closed', function () {
