@@ -1,5 +1,6 @@
 const { app, BrowserWindow, shell, session, desktopCapturer, globalShortcut } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 let store;
 
@@ -163,6 +164,51 @@ async function createWindow() {
   } else {
     mainWindow.loadURL('https://app.v2.gather.town/');
   }
+
+  // Set up availability file watcher
+  const availabilityFile = path.join(app.getPath('userData'), 'user_availability.txt');
+  console.log('Availability file located at:', availabilityFile);
+  let fsTimeout;
+  
+  // ensure file exists to avoid watch errors
+  if (!fs.existsSync(availabilityFile)) {
+    fs.writeFileSync(availabilityFile, '', 'utf8');
+  }
+
+  fs.watch(availabilityFile, (eventType, filename) => {
+    if (eventType === 'change' || eventType === 'rename') {
+      if (!fsTimeout) {
+        fsTimeout = setTimeout(() => {
+          fsTimeout = null;
+          try {
+            if (fs.existsSync(availabilityFile)) {
+              const status = fs.readFileSync(availabilityFile, 'utf8').trim();
+              if (status && mainWindow && mainWindow.webContents) {
+                const code = `
+                  try {
+                    if (window.gatherDev && window.gatherDev.PlayerManager) {
+                      const player = window.gatherDev.PlayerManager.getLocalUserEntity();
+                      if (player && player.spaceUser) {
+                        player.spaceUser.setAvailability({ availability: ${JSON.stringify(status)} });
+                        console.log('Availability set to:', ${JSON.stringify(status)});
+                      }
+                    } else {
+                      console.log('gatherDev not available yet');
+                    }
+                  } catch (e) {
+                    console.error('Error setting availability:', e);
+                  }
+                `;
+                mainWindow.webContents.executeJavaScript(code);
+              }
+            }
+          } catch (err) {
+            console.error('Failed to read availability file:', err);
+          }
+        }, 100); // debounce
+      }
+    }
+  });
 }
 
 app.on('second-instance', () => {
