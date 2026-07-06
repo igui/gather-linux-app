@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, session, desktopCapturer, globalShortcut } = require('electron');
+const { app, BrowserWindow, shell, session, desktopCapturer } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -148,6 +148,36 @@ async function createWindow() {
   mainWindow.webContents.on('will-navigate', blockOffOriginNavigation);
   mainWindow.webContents.on('will-redirect', blockOffOriginNavigation);
 
+  // In-app keyboard shortcuts. before-input-event is scoped to this webContents,
+  // so these fire only while the app window is focused — which is all we need,
+  // since the app already drops mic + camera when it loses focus. Staying local
+  // avoids the Wayland GlobalShortcuts portal (which only registers if the app id
+  // parsed from the systemd scope has a matching .desktop file) and keeps these
+  // out of the desktop environment's global-shortcut settings entirely.
+  //
+  // DevTools (Ctrl+Shift+I) is intentionally NOT handled here — Electron's default
+  // menu already binds that accelerator to toggleDevTools, so handling it again
+  // would toggle twice and cancel out.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || !input.control || !input.shift || input.alt || input.meta) {
+      return;
+    }
+    switch (input.code) {
+      case 'KeyA': // toggle microphone (same store action as Gather's mic button)
+        mainWindow.webContents.executeJavaScript(
+          `globalThis.gatherDev?.Repos?.localMediaSelfInfo?.toggleAudioMuteClicked({ reason: "appShortcut" })`
+        ).catch(console.error);
+        event.preventDefault();
+        break;
+      case 'KeyV': // toggle camera (via the Redux hook installed by preload.js)
+        mainWindow.webContents.executeJavaScript(
+          `window.__toggleGatherVideo?.()`
+        ).catch(console.error);
+        event.preventDefault();
+        break;
+    }
+  });
+
   // Load Gather
   // Gather checks the user agent. We need to pretend to be a regular Chrome browser to avoid the "desktop not supported" error
   mainWindow.webContents.userAgent = mainWindow.webContents.userAgent.replace(/Electron\/\S+ /, '').replace(/gather-app\/\S+ /, '');
@@ -221,46 +251,9 @@ app.on('second-instance', () => {
 app.whenReady().then(() => {
   createWindow();
 
-  // Toggle self mute from anywhere (works even when the window is unfocused).
-  // Calls the same store action as Gather's mic button so the UI stays in sync.
-  // gatherDev.Repos.localMediaSelfInfo only exists after entering a space,
-  // hence the optional chaining.
-  globalShortcut.register('CommandOrControl+Shift+A', () => {
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.executeJavaScript(
-        `globalThis.gatherDev?.Repos?.localMediaSelfInfo?.toggleAudioMuteClicked({ reason: "globalShortcut" })`
-      ).catch(console.error);
-    }
-  });
-
-  // Toggle camera from anywhere. Dispatches setVideoMuteClicked on Gather's
-  // Redux store, captured by preload.js via the Redux DevTools hook. No-op
-  // until the store exists (i.e. before the app chunk loads).
-  globalShortcut.register('CommandOrControl+Shift+V', () => {
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.executeJavaScript(
-        `window.__toggleGatherVideo?.()`
-      ).catch(console.error);
-    }
-  });
-
-  globalShortcut.register('CommandOrControl+Shift+I', () => {
-    if (mainWindow && mainWindow.webContents) {
-      if (mainWindow.webContents.isDevToolsOpened()) {
-        mainWindow.webContents.closeDevTools();
-      } else {
-        mainWindow.webContents.openDevTools({ mode: 'detach' });
-      }
-    }
-  });
-
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
-
-app.on('will-quit', () => {
-  globalShortcut.unregisterAll();
 });
 
 app.on('window-all-closed', function () {
